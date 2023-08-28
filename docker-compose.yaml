@@ -1,0 +1,13 @@
+version: '3'
+services:
+  vd-downloader:
+    container_name: vd-downloader
+    image: kakuheiki/vd-downloader
+    user: root
+    environment:
+      - DISCORD_TOKEN=
+      - SAVE_PATH=
+    volumes:
+      - path/to/download/files:/media
+    restart: unless-stopped
+    network_mode: host

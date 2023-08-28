@@ -1,12 +1,15 @@
 package main
 
 import (
+	_ "crypto/ed25519"
 	"fmt"
-	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
@@ -48,12 +51,11 @@ func main() {
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Ignore messages sent by the bot itself to prevent infinite loops.
 	if strings.HasPrefix(m.Content, "https://") {
-		go downloadVid(m, s)
+		go downloadVideo(m, s)
 	}
 	if m.Author.ID == s.State.User.ID {
 		return
 	}
-	fmt.Println(m.Content)
 
 	// If the message content is "!hello", reply with "Hello, <username>!"
 	if m.Content == "!hello" {
@@ -61,23 +63,62 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 }
 
-func downloadVid(m *discordgo.MessageCreate, s *discordgo.Session) {
-	// Attempt to download the video.
-	resp, err := http.Get("http://192.168.1.18:8000/" + m.Content)
-	if err != nil {
-		fmt.Println("Error downloading video:", err)
-		return
+func downloadVideo(m *discordgo.MessageCreate, s *discordgo.Session) error {
+	app := "yt-dlp"
+	arg1 := m.Content
+	arg0 := "-P"
+	savePath := os.Getenv("SAVE_PATH")
+	if strings.HasPrefix(m.Content, "https://www.instagram") {
+		savePath = os.Getenv("IG_SAVE_PATH")
 	}
-	defer resp.Body.Close()
+	fmt.Println(app, arg0, savePath, arg1)
+	cmd := exec.Command(app, arg0, savePath, arg1)
+	exitCode := cmd.ProcessState.ExitCode()
 
-	// Check if the download was successful (you can add more checks if needed).
-	if resp.StatusCode == http.StatusOK {
-		// Send a success message to the channel.
+	stdout, err := cmd.CombinedOutput()
+	fmt.Println(string(stdout))
+	if strings.HasPrefix(m.Content, "https://www.instagram") {
+		time.Sleep(2 * time.Second)
+		dir := os.Getenv("IG_SAVE_PATH")
+
+		// Get a list of all files in the "media" folder.
+		files, err := filepath.Glob(filepath.Join(dir, "*"))
+		if err != nil {
+			panic(err)
+		}
+
+		// Check if any files were found.
+		if len(files) == 0 {
+			s.ChannelMessageSend(m.ChannelID, "No files found in the 'media' folder.")
+			return nil
+		}
+
+		// Send each file in the folder.
+		for _, file := range files {
+			f, err := os.Open(file)
+			if err != nil {
+				fmt.Println("Error opening file:", err)
+				continue // Skip this file and continue with the next.
+			}
+			defer f.Close()
+
+			_, fileName := filepath.Split(file)
+			s.ChannelFileSend(m.ChannelID, fileName, f)
+			err = os.Remove(file)
+		}
+	}
+	if err != nil {
+		fmt.Println(err.Error())
 		_, err := s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Video: %s downloaded successfully", m.Content))
 		if err != nil {
+			fmt.Println(string(stdout))
+			fmt.Println("Exit code:", exitCode)
 			fmt.Println("Error sending message:", err)
 		}
-	} else {
-		fmt.Println("Video download failed with status code:", resp.StatusCode)
+
+		fmt.Println(string(stdout))
+		return err
 	}
+	fmt.Println(string(stdout))
+	return nil
 }
