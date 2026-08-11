@@ -42,29 +42,42 @@ func DownloadChannelWorkflow(ctx workflow.Context, input DownloadChannelInput) (
 		},
 	})
 
-	// Fan out: kick off every download concurrently, then wait on all of them.
-	futures := make([]workflow.Future, len(scanResult.URLs))
-	for i, url := range scanResult.URLs {
-		futures[i] = workflow.ExecuteActivity(downloadCtx, DownloadVideoActivity, DownloadVideoInput{
-			URL:       url,
-			ChannelID: input.ChannelID,
-		})
-	}
-
+	// Downloads run in batches rather than all at once: yt-dlp (plus ffmpeg
+	// for merging/transcoding) is heavy per-process, and this worker shares
+	// its node with etcd and Longhorn storage duty -- fanning out everything
+	// found in one go is enough to starve the node.
+	const batchSize = 5
 	result := DownloadChannelResult{Found: len(scanResult.URLs)}
-	for _, f := range futures {
-		var r DownloadVideoResult
-		if err := f.Get(ctx, &r); err != nil {
-			result.Failed++
-			continue
+
+	for start := 0; start < len(scanResult.URLs); start += batchSize {
+		end := start + batchSize
+		if end > len(scanResult.URLs) {
+			end = len(scanResult.URLs)
 		}
-		switch {
-		case r.Error != "":
-			result.Failed++
-		case r.Skipped:
-			result.Skipped++
-		default:
-			result.Downloaded++
+		batch := scanResult.URLs[start:end]
+
+		futures := make([]workflow.Future, len(batch))
+		for i, url := range batch {
+			futures[i] = workflow.ExecuteActivity(downloadCtx, DownloadVideoActivity, DownloadVideoInput{
+				URL:       url,
+				ChannelID: input.ChannelID,
+			})
+		}
+
+		for _, f := range futures {
+			var r DownloadVideoResult
+			if err := f.Get(ctx, &r); err != nil {
+				result.Failed++
+				continue
+			}
+			switch {
+			case r.Error != "":
+				result.Failed++
+			case r.Skipped:
+				result.Skipped++
+			default:
+				result.Downloaded++
+			}
 		}
 	}
 
