@@ -47,6 +47,7 @@ func main() {
 
 	w := worker.New(temporalClient, taskQueue, worker.Options{})
 	w.RegisterWorkflow(DownloadChannelWorkflow)
+	w.RegisterWorkflow(DownloadLinksWorkflow)
 	w.RegisterActivity(ScanChannelActivity)
 	w.RegisterActivity(DownloadVideoActivity)
 
@@ -60,10 +61,18 @@ func main() {
 		if m.Author.ID == s.State.User.ID {
 			return
 		}
-		if strings.TrimSpace(m.Content) != triggerCommand {
+
+		if strings.TrimSpace(m.Content) == triggerCommand {
+			go handleTrigger(temporalClient, s, m)
 			return
 		}
-		go handleTrigger(temporalClient, s, m)
+
+		// New message with a link: download just that link automatically,
+		// no command needed. This does NOT re-scan history -- only the
+		// !downloadall command does that, for backfill/catchup.
+		if urls := linkPattern.FindAllString(m.Content, -1); len(urls) > 0 {
+			go handleNewLinks(temporalClient, s, m, urls)
+		}
 	})
 
 	if err := dg.Open(); err != nil {
@@ -128,4 +137,33 @@ func handleTrigger(temporalClient client.Client, s *discordgo.Session, m *discor
 		"Found %d links. Downloaded %d, skipped %d (already archived), failed %d.",
 		result.Found, result.Downloaded, result.Skipped, result.Failed,
 	))
+}
+
+// handleNewLinks downloads the link(s) found in a single new message,
+// automatically, without needing the !downloadall command.
+func handleNewLinks(temporalClient client.Client, s *discordgo.Session, m *discordgo.MessageCreate, urls []string) {
+	workflowID := fmt.Sprintf("download-links-%s-%d", m.ChannelID, time.Now().Unix())
+	run, err := temporalClient.ExecuteWorkflow(context.Background(), client.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: taskQueue,
+	}, DownloadLinksWorkflow, DownloadLinksInput{URLs: urls, ChannelID: m.ChannelID})
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Failed to start download: %v", err))
+		return
+	}
+
+	var result DownloadChannelResult
+	if err := run.Get(context.Background(), &result); err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Download failed: %v", err))
+		return
+	}
+
+	if result.Failed > 0 {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
+			"Downloaded %d, skipped %d (already archived), failed %d.",
+			result.Downloaded, result.Skipped, result.Failed,
+		))
+	}
+	// Stay quiet on full success -- the file showing up in filebrowser is
+	// confirmation enough, no need to narrate every single link.
 }
