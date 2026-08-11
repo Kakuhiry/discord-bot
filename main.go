@@ -38,7 +38,7 @@ func main() {
 		return
 	}
 
-	temporalClient, err := client.Dial(client.Options{HostPort: temporalHost})
+	temporalClient, err := dialTemporalWithRetry(temporalHost)
 	if err != nil {
 		fmt.Println("Error connecting to Temporal:", err)
 		return
@@ -77,6 +77,30 @@ func main() {
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
 	<-sc
+}
+
+// dialTemporalWithRetry retries connecting to Temporal with backoff instead
+// of giving up immediately -- the worker deployment and the Temporal server
+// deployment don't have a guaranteed startup order, so a bare client.Dial on
+// first boot can easily race a Temporal pod that's still coming up.
+func dialTemporalWithRetry(hostPort string) (client.Client, error) {
+	var lastErr error
+	backoff := 2 * time.Second
+	const maxBackoff = 30 * time.Second
+
+	for attempt := 1; attempt <= 10; attempt++ {
+		c, err := client.Dial(client.Options{HostPort: hostPort})
+		if err == nil {
+			return c, nil
+		}
+		lastErr = err
+		fmt.Printf("Temporal not reachable yet (attempt %d): %v; retrying in %s\n", attempt, err, backoff)
+		time.Sleep(backoff)
+		if backoff < maxBackoff {
+			backoff *= 2
+		}
+	}
+	return nil, lastErr
 }
 
 // handleTrigger starts a DownloadChannelWorkflow for the channel the command
