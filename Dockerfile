@@ -1,17 +1,18 @@
-# Use a base image with Go
-FROM golang:1.17 as go-builder
+# Use a base image with Go (bumped from 1.17: go.mod now requires >=1.25.4
+# for the Temporal SDK)
+FROM golang:1.25-bookworm as go-builder
 
 # Set the working directory for the Go application
 WORKDIR /go/src/app
 
 # Copy your Go source code and Go module files
-COPY app.go go.mod go.sum ./
+COPY main.go workflow.go activities.go go.mod go.sum ./
 
 # Download Go module dependencies
 RUN go mod download
 
 # Build the Go application
-RUN GOOS=linux GOARCH=arm64 go build -o app
+RUN GOOS=linux GOARCH=arm64 go build -o app .
 
 # Use a Debian-based image for running your application
 FROM python
